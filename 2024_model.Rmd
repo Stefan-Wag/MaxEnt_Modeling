@@ -1,0 +1,150 @@
+---
+title: 'Modeling Cricket Data Analysis With 2024 Bioclimactic Variables'
+author: "Stefan Wagner"
+subtitle: ''
+output:
+  html_document:
+    css: lab.css
+---
+
+```{r setup, include=FALSE}
+# Setup the environment
+library(knitr)
+knitr::opts_chunk$set(fig.align='center',fig.width=10, fig.height=6, fig.path='Figs/',  warning=FALSE, echo=TRUE, eval=TRUE, message=FALSE)
+
+r = getOption("repos")
+r["CRAN"] = "http://cran.us.r-project.org"
+options(repos = r)
+```
+
+```{r, echo=F, eval=T}
+packagesNeeded<-c('dismo', 'tidyverse', 'raster', 'sf', 'sp', 'rJava', 'ggplot2', 'terra', 'ncdf4')
+# installed packages
+packages<-installed.packages()
+# if the package is not installed, install it
+for(package in packagesNeeded){
+if (!(package %in% packages)){
+    install.packages(package)
+ }}
+```
+
+```{r}
+library(raster)
+library(dismo)
+
+data <- ("C:/MaxEnt_Modeling/R_Script/Cricket-Data-Analysis--main/")
+# Reading CSV Files 
+csv_files <- list.files(path = data, pattern = "\\.csv$", full.names = T, recursive = T)
+
+
+library(tidyverse)
+#function to combine all observations dataframes into one dataframe for analysis
+read_obs <- function(file) {
+  df <- read_csv(file)
+  
+  # read file name without csv - statename 
+  state_name <- tools::file_path_sans_ext(basename(file)) %>%
+    str_remove("_observations")
+  
+  df <- df %>%
+    mutate(state_file = state_name)
+  
+  return(df)  
+
+}
+# combining csv files on row-wise
+occurences <- map_dfr(csv_files, read_obs)
+glimpse(occurences)
+
+western_states <- c(
+  "Arizona", 
+  "California", 
+  "Colorado", 
+  "Idaho", 
+  "Kansas", 
+  "Montana", 
+  "Nebraska",
+  "Nevada",
+  "New Mexico",
+  "North Dakota",
+  "Oklahoma",
+  "Oregon",
+  "South Dakota",
+  "Texas",
+  "Utah",
+  "Washington",
+  "Wyoming"
+  )
+
+states<-st_read("C:/MaxEnt_Modeling/R_Script/cb_2018_us_state_5m.shp")
+west <- states %>%
+  filter(NAME %in% western_states)
+
+```
+
+
+```{r}
+library(terra)
+#creating paths
+tmin_path <- "C:/MaxEnt_Modeling/R_Script/TerraClimate_tmin_2024.nc"
+tmax_path <- "C:/MaxEnt_Modeling/R_Script/TerraClimate_tmax_2024.nc"
+ppt_path <- "C:/MaxEnt_Modeling/R_Script/TerraClimate_ppt_2024.nc"
+
+#creating raster objects
+tmin <- rast(tmin_path)
+tmax <- rast(tmax_path)
+ppt <- rast(ppt_path)
+
+
+west_vector <- vect(west)
+west_proj <- terra::project(west_vector, crs(tmin))
+
+
+
+tmin_west <- mask(crop(tmin, west_proj), west_proj)
+tmax_west <- mask(crop(tmax, west_proj), west_proj)
+ppt_west <- mask(crop(ppt, west_proj), west_proj)
+
+#creating raster stack for bioclim 
+tmin_stack <- raster::stack(tmin_west[[1:12]])
+tmax_stack <- raster::stack(tmax_west[[1:12]])
+ppt_stack <- raster::stack(ppt_west[[1:12]])
+
+biostack <- biovars(tmin = tmin_stack, tmax = tmax_stack, prec = ppt_stack)
+
+plot(biostack)
+
+```
+
+```{r}
+require(rJava)
+
+occurences <- occurences %>%
+  filter(!is.na(latitude), !is.na(longitude))
+
+occur_2024 <- occurences[substr(occurences$observed_on, 1, 4) == 2024, ]
+
+occur_2024 <- occur_2024 %>%
+  filter(!is.na(latitude), !is.na(longitude))
+
+# make occurrences sf then sf SPDF
+occurence_sf_2024 <- st_as_sf(occur_2024, coords = c("longitude", "latitude"), crs = 4326)
+occurence_sp_2024 <- as(occurence_sf_2024, "Spatial")
+# occurences to same spatial reference as bioclim 
+west.occurence_sp <- spTransform(occurence_sp_2024, crs(biostack))
+
+raster_values<-raster::extract(biostack, west.occurence_sp)
+clean_points<-na.omit(raster_values)
+
+# only want rows with valid raster values
+west.occurence_cleaned <- occur_2024 %>%
+  filter(complete.cases(raster_values))
+# same thing to SPDF object
+cases <- complete.cases(raster_values)
+west.occurence_sp_clean <- west.occurence_sp[cases, ]
+# Model - 2.3% of presence points have NA predictor values
+western.model <- dismo::maxent(x=west.bio_mask, p = west.occurence_sp_clean)
+plot(western.model)
+```
+
+
