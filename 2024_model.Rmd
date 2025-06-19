@@ -1,0 +1,181 @@
+---
+title: 'Modeling Cricket Data Analysis With 2024 Bioclimactic Variables'
+author: "Stefan Wagner"
+subtitle: ''
+output:
+  html_document:
+    css: lab.css
+---
+
+```{r setup, include=FALSE}
+# Setup the environment
+library(knitr)
+knitr::opts_chunk$set(fig.align='center',fig.width=10, fig.height=6, fig.path='Figs/',  warning=FALSE, echo=TRUE, eval=TRUE, message=FALSE)
+
+r = getOption("repos")
+r["CRAN"] = "http://cran.us.r-project.org"
+options(repos = r)
+```
+
+```{r, echo=F, eval=T}
+packagesNeeded<-c('dismo', 'tidyverse', 'raster', 'sf', 'sp', 'rJava', 'ggplot2', 'terra', 'ncdf4')
+# installed packages
+packages<-installed.packages()
+# if the package is not installed, install it
+for(package in packagesNeeded){
+if (!(package %in% packages)){
+    install.packages(package)
+ }}
+```
+
+```{r}
+library(raster)
+library(dismo)
+
+data <- ("C:/MaxEnt_Modeling/R_Script/Cricket-Data-Analysis--main/")
+# Reading CSV Files 
+csv_files <- list.files(path = data, pattern = "\\.csv$", full.names = T, recursive = T)
+
+
+library(tidyverse)
+#function to combine all observations dataframes into one dataframe for analysis
+read_obs <- function(file) {
+  df <- read_csv(file)
+  
+  # read file name without csv - statename 
+  state_name <- tools::file_path_sans_ext(basename(file)) %>%
+    str_remove("_observations")
+  
+  df <- df %>%
+    mutate(state_file = state_name)
+  
+  return(df)  
+
+}
+# combining csv files on row-wise
+occurences <- map_dfr(csv_files, read_obs)
+glimpse(occurences)
+
+western_states <- c(
+  "Arizona", 
+  "California", 
+  "Colorado", 
+  "Idaho", 
+  "Kansas", 
+  "Montana", 
+  "Nebraska",
+  "Nevada",
+  "New Mexico",
+  "North Dakota",
+  "Oklahoma",
+  "Oregon",
+  "South Dakota",
+  "Texas",
+  "Utah",
+  "Washington",
+  "Wyoming"
+  )
+
+states<-st_read("C:/MaxEnt_Modeling/R_Script/cb_2018_us_state_5m.shp")
+west <- states %>%
+  filter(NAME %in% western_states)
+
+```
+
+
+```{r}
+library(terra)
+#creating paths
+tmin_path <- "C:/MaxEnt_Modeling/R_Script/TerraClimate_tmin_2024.nc"
+tmax_path <- "C:/MaxEnt_Modeling/R_Script/TerraClimate_tmax_2024.nc"
+ppt_path <- "C:/MaxEnt_Modeling/R_Script/TerraClimate_ppt_2024.nc"
+
+#creating raster objects
+tmin <- rast(tmin_path)
+tmax <- rast(tmax_path)
+ppt <- rast(ppt_path)
+
+
+west_vector <- vect(west)
+west_proj <- terra::project(west_vector, crs(tmin))
+
+tmin_crop <- crop(tmin, west_proj)
+tmin_west <- mask(tmin_crop, west_proj)
+
+tmax_crop <- crop(tmax, west_proj)
+tmax_west <- mask(tmax_crop, west_proj)
+
+ppt_crop <- crop(ppt, west_proj)
+ppt_west <- mask(ppt_crop, west_proj)
+
+
+#creating raster stack for bioclim 
+tmin_stack <- raster::stack(tmin_west)
+tmax_stack <- raster::stack(tmax_west)
+ppt_stack <- raster::stack(ppt_west)
+
+biostack <- biovars(tmin = tmin_stack, tmax = tmax_stack, prec = ppt_stack)
+
+plot(biostack)
+
+```
+
+```{r}
+require(rJava)
+
+occurences <- occurences %>%
+  filter(!is.na(latitude), !is.na(longitude))
+
+
+# querying for 2024
+occur_2024 <- occurences[substr(occurences$observed_on, 1, 4) == 2024, ]
+
+occur_2024 <- occur_2024 %>%
+  filter(!is.na(latitude), !is.na(longitude))
+
+# make occurrences sf then sf SPDF
+occurence_sf_2024 <- st_as_sf(occur_2024, coords = c("longitude", "latitude"), crs = 4326)
+occurence_sp_2024 <- as(occurence_sf_2024, "Spatial")
+# occurences to same spatial reference as bioclim 
+west.occurence_sp_2024 <- spTransform(occurence_sp_2024, crs(biostack))
+
+raster_values_2024<-raster::extract(biostack, west.occurence_sp_2024)
+clean_points_2024<-na.omit(raster_values_2024)
+
+# only want rows with valid raster values
+west.occurence_cleaned_2024 <- occur_2024 %>%
+  filter(complete.cases(raster_values_2024))
+# same thing to SPDF object
+cases_2024 <- complete.cases(raster_values_2024)
+west.occurence_sp_clean_2024 <- west.occurence_sp_2024[cases, ]
+# NOTE!!: Model - 2.3% of presence points have NA predictor values
+western.model_2024 <- dismo::maxent(x=biostack, p = west.occurence_sp_clean_2024)
+plot(western.model_2024)
+
+suitability_2024 <- dismo::predict(western.model_2024, biostack)
+plot(suitability_2024)
+```
+
+
+```{r}
+bio19_2024 <- biostack[["bio19"]]
+bio19_df_2024 <- as.data.frame(bio19_2024, xy = TRUE, na.rm = TRUE)
+
+ggplot(data = bio19_df_2024, aes(x = x, y = y, color = bio19, direction = 1)) +
+  coord_fixed() +
+  geom_point()+
+  theme_minimal()
+
+bio6_2024 <- biostack[["bio6"]]
+bio6_df_2024 <- as.data.frame(bio6_2024, xy = TRUE, na.rm = TRUE)
+
+ggplot(data = bio6_df_2024, aes(x = x, y = y, color = bio6, direction = 1)) +
+  coord_fixed()+
+  geom_point()+
+  theme_minimal()
+
+
+```
+
+
+
